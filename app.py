@@ -91,6 +91,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.setWindowTitle("Vermessung Tätigkeits-Log")
         self.resize(1200, 800)
         self._build_ui()
+        self._load_daily_time()
         self._load_suggestions()
         self.refresh_table()
 
@@ -114,11 +115,12 @@ class MainWindow(QtWidgets.QMainWindow):
         self.date_edit.setCalendarPopup(True)
         self.date_edit.setDisplayFormat("yyyy-MM-dd")
         self.date_edit.dateChanged.connect(self.refresh_table)
+        self.date_edit.dateChanged.connect(self._load_daily_time)
 
         self.employee_edit = QtWidgets.QLineEdit(getpass.getuser())
 
         self.workday_spin = QtWidgets.QDoubleSpinBox()
-        self.workday_spin.setRange(0.5, 24.0)
+        self.workday_spin.setRange(0.0, 24.0)
         self.workday_spin.setSingleStep(0.25)
         self.workday_spin.setValue(WORKDAY_HOURS_DEFAULT)
 
@@ -130,7 +132,38 @@ class MainWindow(QtWidgets.QMainWindow):
 
         form.addRow("Datum", self.date_edit)
         form.addRow("Mitarbeiter", self.employee_edit)
+        # Daily working time
+        self.work_start_edit = QtWidgets.QTimeEdit(QtCore.QTime(8, 0))
+        self.work_start_edit.setDisplayFormat("HH:mm")
+        self.work_end_edit = QtWidgets.QTimeEdit(QtCore.QTime(17, 0))
+        self.work_end_edit.setDisplayFormat("HH:mm")
+        self.break_spin = QtWidgets.QSpinBox()
+        self.break_spin.setRange(0, 600)
+        self.break_spin.setSuffix(" min")
+        self.break_spin.setValue(0)
+
+        self.work_start_edit.timeChanged.connect(self._update_workday_from_daily_time)
+        self.work_end_edit.timeChanged.connect(self._update_workday_from_daily_time)
+        self.break_spin.valueChanged.connect(self._update_workday_from_daily_time)
+
+        work_time_layout = QtWidgets.QHBoxLayout()
+        work_time_layout.addWidget(QtWidgets.QLabel("Beginn"))
+        work_time_layout.addWidget(self.work_start_edit)
+        work_time_layout.addSpacing(10)
+        work_time_layout.addWidget(QtWidgets.QLabel("Ende"))
+        work_time_layout.addWidget(self.work_end_edit)
+        work_time_layout.addSpacing(10)
+        work_time_layout.addWidget(QtWidgets.QLabel("Pause"))
+        work_time_layout.addWidget(self.break_spin)
+        work_time_container = QtWidgets.QWidget()
+        work_time_container.setLayout(work_time_layout)
+
+        self.save_daily_button = QtWidgets.QPushButton("Arbeitszeit speichern")
+        self.save_daily_button.clicked.connect(self._save_daily_time)
+
         form.addRow("Arbeitszeit/Tag (h)", self.workday_spin)
+        form.addRow("Arbeitszeit", work_time_container)
+        form.addRow("", self.save_daily_button)
         form.addRow("Rundung (Anteil)", self.rounding_spin)
         return container
 
@@ -170,6 +203,10 @@ class MainWindow(QtWidgets.QMainWindow):
         self.start_time_edit.setDisplayFormat("HH:mm")
         self.end_time_edit = QtWidgets.QTimeEdit(QtCore.QTime.currentTime())
         self.end_time_edit.setDisplayFormat("HH:mm")
+        self.start_now_button = QtWidgets.QPushButton("Jetzt")
+        self.start_now_button.clicked.connect(self._set_start_now)
+        self.end_now_button = QtWidgets.QPushButton("Jetzt")
+        self.end_now_button.clicked.connect(self._set_end_now)
 
         # Day fraction widgets
         self.fraction_combo = QtWidgets.QComboBox()
@@ -196,8 +233,20 @@ class MainWindow(QtWidgets.QMainWindow):
         # Page 0: start/end
         page_time = QtWidgets.QWidget()
         time_layout = QtWidgets.QFormLayout(page_time)
-        time_layout.addRow("Start", self.start_time_edit)
-        time_layout.addRow("Ende", self.end_time_edit)
+        start_layout = QtWidgets.QHBoxLayout()
+        start_layout.addWidget(self.start_time_edit)
+        start_layout.addWidget(self.start_now_button)
+        start_widget = QtWidgets.QWidget()
+        start_widget.setLayout(start_layout)
+
+        end_layout = QtWidgets.QHBoxLayout()
+        end_layout.addWidget(self.end_time_edit)
+        end_layout.addWidget(self.end_now_button)
+        end_widget = QtWidgets.QWidget()
+        end_widget.setLayout(end_layout)
+
+        time_layout.addRow("Start", start_widget)
+        time_layout.addRow("Ende", end_widget)
         # Page 1: day fraction
         page_fraction = QtWidgets.QWidget()
         frac_layout = QtWidgets.QFormLayout(page_fraction)
@@ -276,6 +325,62 @@ class MainWindow(QtWidgets.QMainWindow):
 
     def _update_rounding(self, value: float):
         self.rounding_step = value
+
+    def _update_workday_from_daily_time(self):
+        start = self.work_start_edit.time()
+        end = self.work_end_edit.time()
+        pause_minutes = self.break_spin.value()
+        if end <= start:
+            net_hours = 0.0
+        else:
+            start_dt = datetime.datetime.combine(datetime.date.today(), start.toPyTime())
+            end_dt = datetime.datetime.combine(datetime.date.today(), end.toPyTime())
+            duration_hours = (end_dt - start_dt).total_seconds() / 3600
+            net_hours = max(0.0, duration_hours - pause_minutes / 60)
+        self.workday_spin.setValue(round(net_hours, 2))
+
+    def _save_daily_time(self):
+        start = self.work_start_edit.time()
+        end = self.work_end_edit.time()
+        if end <= start:
+            QtWidgets.QMessageBox.warning(
+                self,
+                "Zeitfehler",
+                "Arbeitsende muss nach Arbeitsbeginn liegen.",
+            )
+            return
+        self._update_workday_from_daily_time()
+        date_str = self.date_edit.date().toString("yyyy-MM-dd")
+        self.db.upsert_daily_time(
+            date_str,
+            start.toString("HH:mm"),
+            end.toString("HH:mm"),
+            int(self.break_spin.value()),
+            float(self.workday_spin.value()),
+        )
+        self.status_label.setText("Arbeitszeit gespeichert")
+
+    def _load_daily_time(self):
+        date_str = self.date_edit.date().toString("yyyy-MM-dd")
+        record = self.db.fetch_daily_time(date_str)
+        if record:
+            if record["work_start"]:
+                self.work_start_edit.setTime(QtCore.QTime.fromString(record["work_start"], "HH:mm"))
+            if record["work_end"]:
+                self.work_end_edit.setTime(QtCore.QTime.fromString(record["work_end"], "HH:mm"))
+            self.break_spin.setValue(record["break_minutes"] or 0)
+            self.workday_spin.setValue(record["net_hours"] or 0.0)
+        else:
+            self.work_start_edit.setTime(QtCore.QTime(8, 0))
+            self.work_end_edit.setTime(QtCore.QTime(17, 0))
+            self.break_spin.setValue(0)
+            self.workday_spin.setValue(WORKDAY_HOURS_DEFAULT)
+
+    def _set_start_now(self):
+        self.start_time_edit.setTime(QtCore.QTime.currentTime())
+
+    def _set_end_now(self):
+        self.end_time_edit.setTime(QtCore.QTime.currentTime())
 
     def _load_suggestions(self):
         values = self.db.fetch_unique_values()

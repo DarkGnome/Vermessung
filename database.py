@@ -49,6 +49,19 @@ class Database:
             )
             """
         )
+        cur.execute(
+            """
+            CREATE TABLE IF NOT EXISTS daily_times (
+                date TEXT PRIMARY KEY,
+                work_start TEXT,
+                work_end TEXT,
+                break_minutes INTEGER,
+                net_hours REAL,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL
+            )
+            """
+        )
         self.conn.commit()
 
     def insert_entry(self, data: Dict[str, Any]) -> int:
@@ -136,6 +149,44 @@ class Database:
             (month_str,),
         )
         return cur.fetchall()
+
+    def upsert_daily_time(
+        self,
+        date_str: str,
+        work_start: str,
+        work_end: str,
+        break_minutes: int,
+        net_hours: float,
+    ) -> None:
+        now = datetime.datetime.now().isoformat(timespec="seconds")
+        cur = self.conn.cursor()
+        cur.execute(
+            """
+            INSERT INTO daily_times (date, work_start, work_end, break_minutes, net_hours, created_at, updated_at)
+            VALUES (:date, :work_start, :work_end, :break_minutes, :net_hours, :created_at, :updated_at)
+            ON CONFLICT(date) DO UPDATE SET
+                work_start = excluded.work_start,
+                work_end = excluded.work_end,
+                break_minutes = excluded.break_minutes,
+                net_hours = excluded.net_hours,
+                updated_at = excluded.updated_at
+            """,
+            {
+                "date": date_str,
+                "work_start": work_start,
+                "work_end": work_end,
+                "break_minutes": break_minutes,
+                "net_hours": net_hours,
+                "created_at": now,
+                "updated_at": now,
+            },
+        )
+        self.conn.commit()
+
+    def fetch_daily_time(self, date_str: str) -> Optional[sqlite3.Row]:
+        cur = self.conn.cursor()
+        cur.execute("SELECT * FROM daily_times WHERE date = ?", (date_str,))
+        return cur.fetchone()
 
     def close(self) -> None:
         self.conn.close()
